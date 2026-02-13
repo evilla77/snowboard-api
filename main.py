@@ -1,7 +1,7 @@
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from supabase import create_client, Client
 
@@ -14,20 +14,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Guarda l'últim punt rebut (per debug / /latest)
 latest = {}
 
 # --- Supabase (service role) ---
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
 
-# (Opcional però recomanat) secret per evitar spam d'uploads
-INGEST_SECRET = os.environ.get("INGEST_SECRET")  # ex: "paraula_secreta"
-
 supabase: Client | None = None
-
 if SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY:
     supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+
+PAIR_MINUTES = 10  # caducitat del pair_code
 
 
 def _require_supabase():
@@ -39,74 +36,73 @@ def _require_supabase():
 
 
 @app.post("/upload")
-async def upload(p: dict, x_ingest_secret: str | None = Header(default=None)):
+async def upload(p: dict):
     """
-    Rep un punt GPS de l'ESP32:
-      - valida device_id
-      - mira a Supabase (taula 'dispositius') quin user_id correspon
-      - desa el punt a 'punts_gps'
+    Rep un punt de l'ESP32.
+    - Si el dispositiu no existeix: crea registre a 'dispositius' en mode pending amb pair_code i caducitat
+    - Si existeix: actualitza last_seen_at i (si ve pair_code) també pair_code i caducitat
+    - Si està 'linked': (més endavant) es guardarà el punt a punts_gps
     """
     global latest
     latest = p
     print("Rebut:", p)
 
-    # --- Protecció opcional ---
-    # Si has definit INGEST_SECRET a Render, obliguem a enviar header x-ingest-secret
-    if INGEST_SECRET:
-        if x_ingest_secret != INGEST_SECRET:
-            raise HTTPException(status_code=401, detail="No autoritzat (secret incorrecte)")
-
     _require_supabase()
 
     device_id = p.get("device_id")
+    pair_code = p.get("pair_code")
     lat = p.get("lat")
     lon = p.get("lon")
 
     if not device_id:
-        raise HTTPException(status_code=400, detail="Falta 'dispositiu_id'")
+        raise HTTPException(status_code=400, detail="Falta 'device_id'")
     if lat is None or lon is None:
         raise HTTPException(status_code=400, detail="Falten 'lat' i/o 'lon'")
 
-    # 1) Busquem el dispositiu a 'dispositius'
-    try:
-        resp_dev = (
-            supabase.table("dispositius")
-            .select("user_id")
-            .eq("device_id", device_id)
-            .limit(1)
-            .execute()
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error consultat Supabase (dispositius): {e}")
+    now = datetime.now(timezone.utc)
+    expires = now + timedelta(minutes=PAIR_MINUTES)
 
-    if not resp_dev.data:
-        raise HTTPException(status_code=404, detail="Dispositiu no vinculat (no existeix a 'dispositius')")
+    # 1) El dispositiu existeix?
+    resp = (
+        supabase.table("dispositius")
+        .select("id, user_id, status")
+        .eq("device_id", device_id)
+        .limit(1)
+        .execute()
+    )
 
-    user_id = resp_dev.data[0]["user_id"]
+    if not resp.data:
+        # No existeix -> creem pending (necessitem pair_code)
+        if not pair_code:
+            raise HTTPException(status_code=400, detail="Falta 'pair_code' per crear dispositiu pending")
 
-    # 2) Inserim el punt a 'punts_gps'
-    fila = {
-        "user_id": user_id,
-        "device_id": device_id,
-        "t_ms": p.get("t_ms"),
-        "lat": lat,
-        "lon": lon,
-        "alt_m": p.get("alt_m"),
-        "spd_kmh": p.get("spd_kmh"),
-        "course_deg": p.get("course_deg"),
-        "hour": p.get("hour"),
-        "min": p.get("min"),
-        "sec": p.get("sec"),
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
+        supabase.table("dispositius").insert({
+            "device_id": device_id,
+            "status": "pending",
+            "pair_code": pair_code,
+            "pair_expires_at": expires.isoformat(),
+            "last_seen_at": now.isoformat(),
+        }).execute()
 
-    try:
-        resp_ins = supabase.table("punts_gps").insert(fila).execute()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error inserint a Supabase (punts_gps): {e}")
+        return {"ok": True, "status": "pending", "msg": "Creat dispositiu pending"}
 
-    # Si vols, pots retornar també el user_id per debug
-    return {"ok": True, "user_id": user_id}
+    dev = resp.data[0]
+
+    # 2) Sempre actualitzem last_seen_at i, si tenim pair_code, també el refresquem
+    update_obj = {"last_seen_at": now.isoformat()}
+    if pair_code:
+        update_obj["pair_code"] = pair_code
+        update_obj["pair_expires_at"] = expires.isoformat()
+
+    supabase.table("dispositius").update(update_obj).eq("device_id", device_id).execute()
+
+    # 3) Si encara no està vinculat, no guardem punts (de moment)
+    if dev.get("status") != "linked" or not dev.get("user_id"):
+        return {"ok": True, "status": "pending", "msg": "Encara no vinculat"}
+
+    # 4) Si està vinculat, aquí més endavant guardarem punts a punts_gps
+    # (Ho activarem quan fem la pantalla de vincular)
+    return {"ok": True, "status": "linked"}
 
 
 @app.get("/latest")
