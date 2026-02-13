@@ -65,7 +65,7 @@ async def upload(p: dict):
     # 1) El dispositiu existeix?
     resp = (
         supabase.table("dispositius")
-        .select("id, user_id, status")
+        .select("id, usuari_id, status")
         .eq("device_id", device_id)
         .limit(1)
         .execute()
@@ -97,7 +97,7 @@ async def upload(p: dict):
     supabase.table("dispositius").update(update_obj).eq("device_id", device_id).execute()
 
     # 3) Si encara no està vinculat, no guardem punts (de moment)
-    if dev.get("status") != "linked" or not dev.get("user_id"):
+    if dev.get("status") != "linked" or not dev.get("usuari_id"):
         return {"ok": True, "status": "pending", "msg": "Encara no vinculat"}
 
     # 4) Si està vinculat, aquí més endavant guardarem punts a punts_gps
