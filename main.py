@@ -1,10 +1,11 @@
 import os
-import httpx  # Importem httpx per configurar la connexió
+import httpx
 from datetime import datetime, timezone, timedelta
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from supabase import create_client, Client
+from supabase.lib.client_options import ClientOptions  # Import necessari per a les opcions
 
 app = FastAPI()
 
@@ -24,17 +25,22 @@ SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
 supabase: Client | None = None
 
 if SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY:
-    # CORRECCIÓ DEFINITIVA: Forcem HTTP/1.1 per evitar errors de protocol al Render
-    # Creem un client HTTP personalitzat
-    my_http_client = httpx.Client(http2=False, timeout=30.0)
-    
-    # Inicialitzem el client de Supabase passant-li el client HTTP
-    # En versions recents de supabase-py, es fa així:
-    supabase = create_client(
-        SUPABASE_URL, 
-        SUPABASE_SERVICE_ROLE_KEY,
-        options={"http_client": my_http_client}
-    )
+    try:
+        # Forcem HTTP/1.1 per evitar l'error RemoteProtocolError (Stream Reset) al Render
+        my_http_client = httpx.Client(http2=False, timeout=30.0)
+        
+        # Creem l'objecte d'opcions que la llibreria Supabase espera
+        opts = ClientOptions(http_client=my_http_client)
+        
+        # Inicialitzem el client de Supabase
+        supabase = create_client(
+            SUPABASE_URL, 
+            SUPABASE_SERVICE_ROLE_KEY,
+            options=opts
+        )
+        print("Client de Supabase connectat correctament.")
+    except Exception as e:
+        print(f"Error inicialitzant Supabase: {e}")
 
 PAIR_MINUTES = 10
 
@@ -77,7 +83,7 @@ async def upload(p: dict):
             .execute()
         )
 
-        # 2. Si el dispositiu és nou
+        # 2. Si el dispositiu és nou (no està a la taula)
         if not resp.data:
             if not pair_code:
                 raise HTTPException(status_code=400, detail="Falta pair_code")
@@ -92,7 +98,7 @@ async def upload(p: dict):
 
             return {"ok": True, "status": "pending"}
 
-        # 3. Si ja existeix, actualitzem
+        # 3. Si ja existeix, actualitzem el "last_seen_at" i el codi
         dev = resp.data[0]
         update_obj = {"last_seen_at": now.isoformat()}
         
@@ -111,7 +117,7 @@ async def upload(p: dict):
         return {"ok": True, "status": "linked"}
 
     except Exception as e:
-        print(f"Error en la operació de Supabase: {e}")
+        print(f"Error en l'operació amb Supabase: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/")
