@@ -1,4 +1,5 @@
 import os
+import httpx
 from datetime import datetime, timezone, timedelta
 
 from fastapi import FastAPI, HTTPException
@@ -21,7 +22,8 @@ SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
 
 supabase: Client | None = None
 if SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY:
-    supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    http_client = httpx.Client(http2=False, timeout=20.0)
+    supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, http_client=http_client)
 
 PAIR_MINUTES = 10
 
