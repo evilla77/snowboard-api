@@ -1,4 +1,5 @@
 import os
+import httpx  # Importem httpx per configurar la connexió
 from datetime import datetime, timezone, timedelta
 
 from fastapi import FastAPI, HTTPException
@@ -21,9 +22,19 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
 
 supabase: Client | None = None
+
 if SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY:
-    # CORRECCIÓ: Eliminat el bloc httpx que causava el TypeError al Render
-    supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    # CORRECCIÓ DEFINITIVA: Forcem HTTP/1.1 per evitar errors de protocol al Render
+    # Creem un client HTTP personalitzat
+    my_http_client = httpx.Client(http2=False, timeout=30.0)
+    
+    # Inicialitzem el client de Supabase passant-li el client HTTP
+    # En versions recents de supabase-py, es fa així:
+    supabase = create_client(
+        SUPABASE_URL, 
+        SUPABASE_SERVICE_ROLE_KEY,
+        options={"http_client": my_http_client}
+    )
 
 PAIR_MINUTES = 10
 
@@ -37,7 +48,7 @@ def _require_supabase():
 @app.post("/upload")
 async def upload(p: dict):
     global latest
-    latest = p  # Actualitzem la variable global amb l'última posició
+    latest = p  
     print("Rebut de l'ESP32:", p)
 
     _require_supabase()
@@ -50,54 +61,58 @@ async def upload(p: dict):
     if not dispositiu_id:
         raise HTTPException(status_code=400, detail="Falta 'device_id'")
     
-    # Validació de lat/lon (encara que no les guardem a taula, l'ESP32 les envia)
     if lat is None or lon is None:
         raise HTTPException(status_code=400, detail="Falten coordenades")
 
     now = datetime.now(timezone.utc)
     expires = now + timedelta(minutes=PAIR_MINUTES)
 
-    # 1. Busquem l'estat actual del dispositiu
-    resp = (
-        supabase.table("dispositius")
-        .select("id, usuari_id, status")
-        .eq("dispositiu_id", dispositiu_id)
-        .limit(1)
-        .execute()
-    )
+    try:
+        # 1. Busquem l'estat actual del dispositiu
+        resp = (
+            supabase.table("dispositius")
+            .select("id, usuari_id, status")
+            .eq("dispositiu_id", dispositiu_id)
+            .limit(1)
+            .execute()
+        )
 
-    # 2. Si el dispositiu és nou (no està a la taula)
-    if not resp.data:
-        if not pair_code:
-            raise HTTPException(status_code=400, detail="Falta pair_code")
+        # 2. Si el dispositiu és nou
+        if not resp.data:
+            if not pair_code:
+                raise HTTPException(status_code=400, detail="Falta pair_code")
 
-        supabase.table("dispositius").insert({
-            "dispositiu_id": dispositiu_id,
-            "status": "pending",
-            "pair_code": pair_code,
-            "pair_expires_at": expires.isoformat(),
-            "last_seen_at": now.isoformat(),
-        }).execute()
+            supabase.table("dispositius").insert({
+                "dispositiu_id": dispositiu_id,
+                "status": "pending",
+                "pair_code": pair_code,
+                "pair_expires_at": expires.isoformat(),
+                "last_seen_at": now.isoformat(),
+            }).execute()
 
-        return {"ok": True, "status": "pending"}
+            return {"ok": True, "status": "pending"}
 
-    # 3. Si ja existeix, actualitzem el "last_seen_at" i el codi si n'hi ha un de nou
-    dev = resp.data[0]
-    update_obj = {"last_seen_at": now.isoformat()}
-    
-    if pair_code:
-        update_obj["pair_code"] = pair_code
-        update_obj["pair_expires_at"] = expires.isoformat()
+        # 3. Si ja existeix, actualitzem
+        dev = resp.data[0]
+        update_obj = {"last_seen_at": now.isoformat()}
+        
+        if pair_code:
+            update_obj["pair_code"] = pair_code
+            update_obj["pair_expires_at"] = expires.isoformat()
 
-    supabase.table("dispositius").update(update_obj)\
-        .eq("dispositiu_id", dispositiu_id)\
-        .execute()
+        supabase.table("dispositius").update(update_obj)\
+            .eq("dispositiu_id", dispositiu_id)\
+            .execute()
 
-    # 4. Verifiquem l'estat per respondre a l'ESP32
-    if dev.get("status") != "linked" or not dev.get("usuari_id"):
-        return {"ok": True, "status": "pending"}
+        # 4. Verifiquem l'estat per respondre a l'ESP32
+        if dev.get("status") != "linked" or not dev.get("usuari_id"):
+            return {"ok": True, "status": "pending"}
 
-    return {"ok": True, "status": "linked"}
+        return {"ok": True, "status": "linked"}
+
+    except Exception as e:
+        print(f"Error en la operació de Supabase: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/")
 def root():
