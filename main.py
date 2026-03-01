@@ -103,18 +103,21 @@ async def upload(p: dict):
             else:
                 session_id = active_sessions[0]["id"]
 
-            # --- MODIFICACIÓ: GUARDEM TAMBÉ TEMP I HUM ---
+            # --- MODIFICACIÓ: AFEGIM PRESSIÓ (pressure) ---
             gps_data = {
                 "session_id": session_id,
                 "latitude": p.get("lat"),
                 "longitude": p.get("lon"),
                 "altitude": p.get("alt_m"),
                 "speed": p.get("spd_kmh"),
-                "temperature": p.get("temp"), # Agafem el camp del JSON de l'ESP32
-                "humidity": p.get("hum")       # Agafem el camp del JSON de l'ESP32
+                "temperature": p.get("temp"), 
+                "humidity": p.get("hum"),
+                "pressure": p.get("pres") # <--- LLEGIM 'pres' DEL JSON DE L'ESP32
             }
             r_gps = requests.post(f"{URL}/rest/v1/punts_gps", headers=headers, json=gps_data)
-            print(f"DEBUG INSERT GPS (Temp: {p.get('temp')}, Hum: {p.get('hum')}): {r_gps.status_code}")
+            
+            # Print de diagnòstic amb totes les dades del BME280
+            print(f"DEBUG INSERT GPS -> Temp: {p.get('temp')}°C, Hum: {p.get('hum')}%, Pres: {p.get('pres')}hPa | Status: {r_gps.status_code}")
         
         else:
             if active_sessions:
