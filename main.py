@@ -38,7 +38,7 @@ async def upload(p: dict):
         "apikey": KEY,
         "Authorization": f"Bearer {KEY}",
         "Content-Type": "application/json",
-        "Prefer": "return=representation" # Crucial per rebre l'ID de la sessió creada
+        "Prefer": "return=representation" 
     }
 
     now = datetime.now(timezone.utc)
@@ -63,11 +63,10 @@ async def upload(p: dict):
                 "is_recording": gravant
             }
             r_insert = requests.post(f"{URL}/rest/v1/dispositius", headers=headers, json=insert_data)
-            print(f"DEBUG INSERT DISP: {r_insert.status_code} - {r_insert.text}")
             r_insert.raise_for_status()
             return {"ok": True, "status": "pending"}
 
-        # 3. Si ja existeix, actualitzem dades de connexió i estat de gravació
+        # 3. Si ja existeix, actualitzem
         dev = data[0]
         update_data = {
             "last_seen_at": now.isoformat(),
@@ -79,67 +78,48 @@ async def upload(p: dict):
 
         update_url = f"{URL}/rest/v1/dispositius?dispositiu_id=eq.{dispositiu_id}"
         r_update = requests.patch(update_url, headers=headers, json=update_data)
-        
-        # --- MODIFICACIÓ 1: DIAGNÒSTIC DISPOSITIU ---
-        print(f"DEBUG UPDATE DISP: {r_update.status_code} - {r_update.text}")
         r_update.raise_for_status()
 
-        # Si no està vinculat, no fem res més
         if dev.get("status") != "linked" or not dev.get("usuari_id"):
-            print(f"DEBUG: Dispositiu no vinculat (Status: {dev.get('status')})")
             return {"ok": True, "status": "pending"}
 
-        # --- LÒGICA DE SESSIONS I GPS (Només si està linked) ---
-        
-        # A. Busquem si hi ha sessió activa (sense ended_at)
+        # --- LÒGICA DE SESSIONS I GPS ---
         session_search_url = f"{URL}/rest/v1/sessions?dispositiu_id=eq.{dispositiu_id}&ended_at=is.null&select=id"
         r_sess_search = requests.get(session_search_url, headers=headers)
         active_sessions = r_sess_search.json()
 
         if gravant:
-            # Si el botó està ON
             if not active_sessions:
-                print("DEBUG: Creant nova sessió...")
                 new_session_data = {
                     "dispositiu_id": dispositiu_id,
                     "usuari_id": dev.get("usuari_id"),
                     "started_at": now.isoformat()
                 }
                 r_new_sess = requests.post(f"{URL}/rest/v1/sessions", headers=headers, json=new_session_data)
-                
-                # --- MODIFICACIÓ 2: DIAGNÒSTIC SESSIÓ ---
-                print(f"DEBUG NEW SESSION: {r_new_sess.status_code} - {r_new_sess.text}")
-                
                 res_sess = r_new_sess.json()
                 if not res_sess:
-                    print("ERROR: Supabase no ha retornat dades de la sessió!")
                     return {"ok": False, "error": "No s'ha pogut crear la sessió"}
-                
                 session_id = res_sess[0]["id"]
             else:
                 session_id = active_sessions[0]["id"]
-                print(f"DEBUG: Utilitzant sessió activa ID: {session_id}")
 
-            # Guardem el punt GPS
+            # --- MODIFICACIÓ: GUARDEM TAMBÉ TEMP I HUM ---
             gps_data = {
                 "session_id": session_id,
                 "latitude": p.get("lat"),
                 "longitude": p.get("lon"),
                 "altitude": p.get("alt_m"),
-                "speed": p.get("spd_kmh")
+                "speed": p.get("spd_kmh"),
+                "temperature": p.get("temp"), # Agafem el camp del JSON de l'ESP32
+                "humidity": p.get("hum")       # Agafem el camp del JSON de l'ESP32
             }
             r_gps = requests.post(f"{URL}/rest/v1/punts_gps", headers=headers, json=gps_data)
-            
-            # --- MODIFICACIÓ 3: DIAGNÒSTIC PUNT GPS ---
-            print(f"DEBUG INSERT GPS: {r_gps.status_code} - {r_gps.text}")
+            print(f"DEBUG INSERT GPS (Temp: {p.get('temp')}, Hum: {p.get('hum')}): {r_gps.status_code}")
         
         else:
-            # Si el botó està OFF, tanquem qualsevol sessió oberta
             if active_sessions:
-                print(f"DEBUG: Tancant sessió {active_sessions[0]['id']}...")
                 close_url = f"{URL}/rest/v1/sessions?id=eq.{active_sessions[0]['id']}"
-                r_close = requests.patch(close_url, headers=headers, json={"ended_at": now.isoformat()})
-                print(f"DEBUG CLOSE SESSION: {r_close.status_code}")
+                requests.patch(close_url, headers=headers, json={"ended_at": now.isoformat()})
 
         return {"ok": True, "status": "linked", "gravant": gravant}
 
