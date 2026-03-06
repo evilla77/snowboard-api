@@ -5,131 +5,92 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-latest = {}
-
-# Configuració
 URL = os.environ.get("SUPABASE_URL")
 KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
 PAIR_MINUTES = 10
 
+def calcular_direccio(graus):
+    if graus < 0: return "--"
+    dirs = ["N","NE","E","SE","S","SO","O","NO"]
+    i = int((graus + 22.5) / 45.0)
+    return dirs[i % 8]
+
 @app.post("/upload")
 async def upload(p: dict):
-    global latest
-    latest = p
-    print(f"\n--- NOVA DADA REBUDA (Gravant: {p.get('gravant')}) ---")
-    print("JSON:", p)
-
-    dispositiu_id = p.get("device_id")
-    pair_code = p.get("pair_code")
-    gravant = p.get("gravant", False) 
+    dis_id = p.get("device_id")
+    if not dis_id: raise HTTPException(status_code=400, detail="Falta device_id")
     
-    if not dispositiu_id:
-        raise HTTPException(status_code=400, detail="Falta 'device_id'")
-
+    gravant = p.get("gravant", False)
+    pair_code = p.get("pair_code")
     headers = {
-        "apikey": KEY,
-        "Authorization": f"Bearer {KEY}",
-        "Content-Type": "application/json",
-        "Prefer": "return=representation" 
+        "apikey": KEY, 
+        "Authorization": f"Bearer {KEY}", 
+        "Content-Type": "application/json", 
+        "Prefer": "return=representation"
     }
-
+    
     now = datetime.now(timezone.utc)
     expires = now + timedelta(minutes=PAIR_MINUTES)
 
     try:
-        # 1. Busquem el dispositiu
-        search_url = f"{URL}/rest/v1/dispositius?dispositiu_id=eq.{dispositiu_id}&select=id,usuari_id,status"
-        r_search = requests.get(search_url, headers=headers)
-        r_search.raise_for_status()
-        data = r_search.json()
+        # 1. Estat del Dispositiu
+        r_dev = requests.get(f"{URL}/rest/v1/dispositius?dispositiu_id=eq.{dis_id}&select=id,usuari_id,status", headers=headers)
+        data = r_dev.json()
 
-        # 2. Si el dispositiu és nou
         if not data:
-            print(f"DEBUG: Dispositiu {dispositiu_id} no trobat, creant...")
-            insert_data = {
-                "dispositiu_id": dispositiu_id,
-                "status": "pending",
-                "pair_code": pair_code,
-                "pair_expires_at": expires.isoformat(),
-                "last_seen_at": now.isoformat(),
-                "is_recording": gravant
+            new_dev = {
+                "dispositiu_id": dis_id, "status": "pending", "pair_code": pair_code,
+                "pair_expires_at": expires.isoformat(), "last_seen_at": now.isoformat(), "is_recording": gravant
             }
-            r_insert = requests.post(f"{URL}/rest/v1/dispositius", headers=headers, json=insert_data)
-            r_insert.raise_for_status()
+            requests.post(f"{URL}/rest/v1/dispositius", headers=headers, json=new_dev)
             return {"ok": True, "status": "pending"}
 
-        # 3. Si ja existeix, actualitzem
         dev = data[0]
-        update_data = {
-            "last_seen_at": now.isoformat(),
-            "is_recording": gravant
-        }
-        if pair_code:
-            update_data["pair_code"] = pair_code
-            update_data["pair_expires_at"] = expires.isoformat()
-
-        update_url = f"{URL}/rest/v1/dispositius?dispositiu_id=eq.{dispositiu_id}"
-        r_update = requests.patch(update_url, headers=headers, json=update_data)
-        r_update.raise_for_status()
+        requests.patch(f"{URL}/rest/v1/dispositius?dispositiu_id=eq.{dis_id}", headers=headers, json={
+            "last_seen_at": now.isoformat(), "is_recording": gravant, "pair_code": pair_code, "pair_expires_at": expires.isoformat()
+        })
 
         if dev.get("status") != "linked" or not dev.get("usuari_id"):
             return {"ok": True, "status": "pending"}
 
-        # --- LÒGICA DE SESSIONS I GPS ---
-        session_search_url = f"{URL}/rest/v1/sessions?dispositiu_id=eq.{dispositiu_id}&ended_at=is.null&select=id"
-        r_sess_search = requests.get(session_search_url, headers=headers)
-        active_sessions = r_sess_search.json()
+        # 2. Gestió de Sessions
+        r_sess = requests.get(f"{URL}/rest/v1/sessions?dispositiu_id=eq.{dis_id}&ended_at=is.null&select=id", headers=headers)
+        active_sessions = r_sess.json()
 
         if gravant:
             if not active_sessions:
-                new_session_data = {
-                    "dispositiu_id": dispositiu_id,
-                    "usuari_id": dev.get("usuari_id"),
-                    "started_at": now.isoformat()
-                }
-                r_new_sess = requests.post(f"{URL}/rest/v1/sessions", headers=headers, json=new_session_data)
-                res_sess = r_new_sess.json()
-                if not res_sess:
-                    return {"ok": False, "error": "No s'ha pogut crear la sessió"}
-                session_id = res_sess[0]["id"]
+                r_new = requests.post(f"{URL}/rest/v1/sessions", headers=headers, json={
+                    "dispositiu_id": dis_id, "usuari_id": dev.get("usuari_id"), "started_at": now.isoformat()
+                })
+                session_id = r_new.json()[0]["id"]
             else:
                 session_id = active_sessions[0]["id"]
 
-            # --- MODIFICACIÓ: AFEGIM PRESSIÓ (pressure) ---
-            gps_data = {
+            # 3. Guardar punt GPS amb telemetria BME280
+            gps_point = {
                 "session_id": session_id,
                 "latitude": p.get("lat"),
                 "longitude": p.get("lon"),
-                "altitude": p.get("alt_m"),
-                "speed": p.get("spd_kmh"),
-                "temperature": p.get("temp"), 
+                "altitude": p.get("alt"),
+                "speed": p.get("spd"),
+                "temperature": p.get("temp"),
                 "humidity": p.get("hum"),
-                "pressure": p.get("pres") # <--- LLEGIM 'pres' DEL JSON DE L'ESP32
+                "pressure": p.get("pres"),
+                "course_text": calcular_direccio(p.get("course", -1)) # Lògica al servidor!
             }
-            r_gps = requests.post(f"{URL}/rest/v1/punts_gps", headers=headers, json=gps_data)
-            
-            # Print de diagnòstic amb totes les dades del BME280
-            print(f"DEBUG INSERT GPS -> Temp: {p.get('temp')}°C, Hum: {p.get('hum')}%, Pres: {p.get('pres')}hPa | Status: {r_gps.status_code}")
-        
-        else:
-            if active_sessions:
-                close_url = f"{URL}/rest/v1/sessions?id=eq.{active_sessions[0]['id']}"
-                requests.patch(close_url, headers=headers, json={"ended_at": now.isoformat()})
+            requests.post(f"{URL}/rest/v1/punts_gps", headers=headers, json=gps_point)
+            print(f"Punt guardat: {p.get('temp')}C a {calcular_direccio(p.get('course', -1))}")
 
-        return {"ok": True, "status": "linked", "gravant": gravant}
+        elif active_sessions:
+            requests.patch(f"{URL}/rest/v1/sessions?id=eq.{active_sessions[0]['id']}", headers=headers, json={"ended_at": now.isoformat()})
+
+        return {"ok": True, "status": "linked"}
 
     except Exception as e:
-        print(f"!!! ERROR EXCEPCIÓ: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Error: {e}")
+        return {"ok": False, "error": str(e)}
 
 @app.get("/")
-def root():
-    return {"status": "ok", "info": "Servidor Snowboard Actiu"}
+def root(): return {"status": "ok", "msg": "Arquitectura Offloading Activa"}
