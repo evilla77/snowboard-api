@@ -60,8 +60,17 @@ async def upload(p: dict):
                 r_new = requests.post(f"{URL}/rest/v1/sessions", headers=headers, json={
                     "dispositiu_id": dis_id, "usuari_id": dev.get("usuari_id"), "started_at": now.isoformat()
                 })
-                session_id = r_new.json()[0]["id"]
-                print(f"Sessió NOVA creada: {session_id}")
+                
+                # --- ARREGLO DE SEGURETAT PER OBTENIR L'ID SENSE REVENTAR EL CODI ---
+                res_json = r_new.json()
+                if isinstance(res_json, list) and len(res_json) > 0:
+                    session_id = res_json[0]["id"]
+                else:
+                    # Si el POST no ha tornat l'array amb la ID, la busquem de manera directa
+                    r_retry = requests.get(f"{URL}/rest/v1/sessions?dispositiu_id=eq.{dis_id}&ended_at=is.null&select=id", headers=headers)
+                    session_id = r_retry.json()[0]["id"]
+                
+                print(f"Sessió NOVA creada i vinculada: {session_id}")
             else:
                 session_id = active_sessions[0]["id"]
 
