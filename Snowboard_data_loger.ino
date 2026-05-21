@@ -8,6 +8,9 @@
 #include <Adafruit_BME280.h>
 #include "esp_sleep.h" // Llibreria per al Light Sleep (Gestió d'energia)
 
+// MODIFICACIÓ: Incloem la llibreria de l'MPU6050 que ha funcionat
+#include "MPU6050.h"
+
 // MODIFICACIÓ: Llibreries per a la pantalla OLED (Eliminada la LiquidCrystal_I2C)
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
@@ -22,18 +25,26 @@ TinyGPSPlus gps;
 HardwareSerial gpsSerial(2); 
 Adafruit_BME280 bme; 
 
+// MODIFICACIÓ: Inicialitzem l'objecte per al sensor MPU6050 clonat
+MPU6050 mpu;
+
 const char* WIFI_SSID = "EV-OnWifi.cat"; 
 //const char* WIFI_SSID = "vivo Y72 5G";
 const char* WIFI_PASS = "onwifimola"; 
 const char* SERVER_URL = "https://snowboard-api.onrender.com/upload";
 
-const int BOTO_BOOT = 0;       
+// MODIFICACIÓ MÍNIMA: Canviat el pin BOOT (0) pel nou botó de 3 pins al GPIO 14
+const int BOTO_BOOT = 14;       
 const int PIN_LED_ESTAT = 2;  
 bool gravant = false;          
 bool isLinked = false;
 int ultimEstatBoto = HIGH;
 unsigned long lastSendMs = 0;
 String pair_code = "";
+
+// MODIFICACIÓ: Temporitzador ajustat a 5 minuts exactes per renovar el codi de vinculació
+unsigned long lastPairCodeRenewMs = 0; 
+const unsigned long RENEW_PAIR_CODE_INTERVAL = 300000; // 5 minuts en mil·lisegons (5 * 60 * 1000)
 
 void connectaWiFi() {
   if (WiFi.status() == WL_CONNECTED) return;
@@ -49,6 +60,14 @@ void printDebugLocal(float t, float h, float p) {
   Serial.printf("GPS: Lat %.6f, Lon %.6f | Sats: %d\n", gps.location.lat(), gps.location.lng(), gps.satellites.value());
   Serial.printf("ESTAT: %s\n", gravant ? "GRAVANT" : "ESPERANT");
   Serial.println("---------------------\n");
+}
+
+// Funció auxiliar per generar un codi nou (per no repetir codi al setup i al loop)
+void generaNouPairCode() {
+  pair_code = String(esp_random() % 1000000);
+  while(pair_code.length() < 6) pair_code = "0" + pair_code;
+  Serial.print("--- NOU PAIR CODE GENERAT: ");
+  Serial.println(pair_code);
 }
 
 void setup() {
@@ -71,16 +90,25 @@ void setup() {
   Wire.begin(); 
   Wire.setClock(100000); // Velocitat estable per evitar soroll amb el sensor de temp
   
+  // MODIFICACIÓ: Inicialització i configuració forçada de l'MPU6050 per saltar el bloqueig del clon
+  Serial.println("-> Inicialitzant el xip MPU6050...");
+  mpu.initialize();
+  Serial.println("-> Forçant la configuració del sensor clonat...");
+  mpu.setFullScaleAccelRange(MPU6050_ACCEL_FS_16);
+  mpu.setFullScaleGyroRange(MPU6050_GYRO_FS_2000);
+
   bme.begin(0x76);
   gpsSerial.begin(9600, SERIAL_8N1, 16, -1);
   connectaWiFi();
-  pair_code = String(esp_random() % 1000000);
-  while(pair_code.length() < 6) pair_code = "0" + pair_code;
+  
+  // Generem el primer codi de l'arrencada
+  generaNouPairCode();
+  lastPairCodeRenewMs = millis(); // Inicialitzem el comptador del temps
 
-  // COMENTARI NOU: Configurem que el botó pugui despertar l'ESP32 del Light Sleep instantàniament
-  esp_sleep_enable_ext0_wakeup(GPIO_NUM_0, 0); 
+  // MODIFICACIÓ MÍNIMA: Configurem el GPIO_NUM_14 per despertar de l'asno del Light Sleep
+  esp_sleep_enable_ext0_wakeup(GPIO_NUM_14, 1); 
 
-  // MODIFICACIÓ: Engeguem la pantalla OLED amb el missatge "hola maduixa"
+  // MODIFICACIÓ: Engeguem la pantalla OLED com a l'origen amb el missatge "hola rider"
   if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { 
     Serial.println(F("Error: No s'ha pogut iniciar l'OLED"));
   } else {
@@ -88,7 +116,7 @@ void setup() {
     display.setTextSize(2);      // Mida de lletra gran
     display.setTextColor(SSD1306_WHITE); // Color blanc
     display.setCursor(10, 20);   // Posició a la pantalla (X, Y)
-    display.print("hola\n  maduixa"); 
+    display.print("Welcome\n  rider"); 
     display.display();           // Envia les dades físicament a la pantalla per pintar-les
   }
 }
@@ -98,11 +126,17 @@ void loop() {
   while (gpsSerial.available()) { gps.encode(gpsSerial.read()); }
   unsigned long currentMillis = millis();
 
-  // 2. LECTURA DEL BOTÓ (Commuta entre GRAVANT i ESPERANT)
+  // MODIFICACIÓ: Si NO està vinculat, comprovem si han passat 5 minuts per canviar el codi
+  if (!isLinked && (currentMillis - lastPairCodeRenewMs > RENEW_PAIR_CODE_INTERVAL)) {
+    lastPairCodeRenewMs = currentMillis;
+    generaNouPairCode(); // Genera un codi totalment nou de 6 dígits cada 5 minuts
+  }
+
+  // 2. LECTURA DEL BOTÓ (Adaptada per al canvi de pin i lògica inversa del botó NC)
   int estatBoto = digitalRead(BOTO_BOOT);
-  if (ultimEstatBoto == HIGH && estatBoto == LOW) {
+  if (ultimEstatBoto == LOW && estatBoto == HIGH) {
     delay(50);
-    if (digitalRead(BOTO_BOOT) == LOW) gravant = !gravant;
+    if (digitalRead(BOTO_BOOT) == HIGH) gravant = !gravant;
   }
   ultimEstatBoto = estatBoto;
 
@@ -113,6 +147,19 @@ void loop() {
     float t = bme.readTemperature();
     float h = bme.readHumidity();
     float p = bme.readPressure() / 100.0F;
+
+    // MODIFICACIÓ: Llegim les variables de l'MPU6050 abans d'armar el JSON
+    int16_t rawAX, rawAY, rawAZ;
+    int16_t rawGX, rawGY, rawGZ;
+    mpu.getMotion6(&rawAX, &rawAY, &rawAZ, &rawGX, &rawGY, &rawGZ);
+
+    float accX = (float)rawAX / 2048.0;
+    float accY = (float)rawAY / 2048.0;
+    float accZ = (float)rawAZ / 2048.0;
+
+    float gyroX = (float)rawGX / 16.4;
+    float gyroY = (float)rawGY / 16.4;
+    float gyroZ = (float)rawGZ / 16.4;
 
     printDebugLocal(t, h, p); // DISPLAY LOCAL (Comentari recuperat)
 
@@ -128,7 +175,14 @@ void loop() {
       json += "\"gravant\":" + String(gravant ? "true" : "false") + ",";
       json += "\"temp\":" + (isnan(t) ? "null" : String(t, 2)) + ",";
       json += "\"hum\":" + (isnan(h) ? "null" : String(h, 2)) + ",";
-      json += "\"pres\":" + (isnan(p) ? "null" : String(p, 2));
+      json += "\"pres\":" + (isnan(p) ? "null" : String(p, 2)) + ",";
+      // MODIFICACIÓ: Afegides les 6 noves variables reals al final del JSON de forma idèntica
+      json += "\"accX\":" + String(accX, 2) + ",";
+      json += "\"accY\":" + String(accY, 2) + ",";
+      json += "\"accZ\":" + String(accZ, 2) + ",";
+      json += "\"gyroX\":" + String(gyroX, 2) + ",";
+      json += "\"gyroY\":" + String(gyroY, 2) + ",";
+      json += "\"gyroZ\":" + String(gyroZ, 2);
       json += "}";
 
       // IMPRIMIR JSON PER PANTALLA (Petició de l'usuari)
@@ -145,9 +199,39 @@ void loop() {
       int code = http.POST(json);
       
       if (code > 0) {
-        isLinked = (http.getString().indexOf("\"status\":\"linked\"") != -1);
+        String respostaServidor = http.getString();
+        Serial.print("--- RESP_SERVIDOR: ");
+        Serial.println(respostaServidor);
+
+        // CORREGIT: Busquem la paraula linked lliure de cometes i espais per evitar errors de lectura
+        isLinked = (respostaServidor.indexOf("linked") != -1);
+      } else {
+        Serial.printf("Error HTTP de connexio: %d\n", code);
       }
       http.end();
     }
+
+    // MODIFICACIÓ CLÍTICA: Lògica de pantalles sol·licitada (linked, RECORDING o pendint)
+    display.clearDisplay();
+    display.setTextColor(SSD1306_WHITE);
+    
+    if (isLinked) {
+      display.setTextSize(2);
+      display.setCursor(0, 20);
+      
+      // Si està vinculat, mirem si l'usuari ha premut el botó de gravar
+      if (gravant) {
+        display.print("RECORDING"); // Text en anglès quan grava
+      } else {
+        display.print("linked");    // Torna a linked si parem de gravar
+      }
+    } else {
+      display.setTextSize(2);
+      display.setCursor(0, 5);
+      display.print("pendint\n");
+      display.print("Cod:");
+      display.print(pair_code);
+    }
+    display.display(); // Actualitza la pantalla amb els nous canvis reals
   }
 }
