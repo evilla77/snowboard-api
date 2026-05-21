@@ -61,12 +61,10 @@ async def upload(p: dict):
                     "dispositiu_id": dis_id, "usuari_id": dev.get("usuari_id"), "started_at": now.isoformat()
                 })
                 
-                # --- ARREGLO DE SEGURETAT PER OBTENIR L'ID SENSE REVENTAR EL CODI ---
                 res_json = r_new.json()
                 if isinstance(res_json, list) and len(res_json) > 0:
                     session_id = res_json[0]["id"]
                 else:
-                    # Si el POST no ha tornat l'array amb la ID, la busquem de manera directa
                     r_retry = requests.get(f"{URL}/rest/v1/sessions?dispositiu_id=eq.{dis_id}&ended_at=is.null&select=id", headers=headers)
                     session_id = r_retry.json()[0]["id"]
                 
@@ -79,8 +77,10 @@ async def upload(p: dict):
             # --- DISPLAY DE TELEMETRIA ---
             print(f"Guardant punt: {p.get('temp')}°C | {p.get('pres')}hPa | Rumb: {direccio_text}")
 
+            # MODIFICACIÓ MÍNIMA: Afegit 'usuari_id' i mantingut el 'course_text'
             requests.post(f"{URL}/rest/v1/punts_gps", headers=headers, json={
                 "session_id": session_id,
+                "usuari_id": dev.get("usuari_id"),
                 "latitude": p.get("lat"),
                 "longitude": p.get("lon"),
                 "altitude": p.get("alt"),
