@@ -28,15 +28,15 @@ Adafruit_BME280 bme;
 // MODIFICACIÓ: Inicialitzem l'objecte per al sensor MPU6050 clonat
 MPU6050 mpu;
 
-const char* WIFI_SSID = "EV-OnWifi.cat"; 
-//const char* WIFI_SSID = "vivo Y72 5G";
+//const char* WIFI_SSID = "EV-OnWifi.cat"; 
+const char* WIFI_SSID = "vivo Y72 5G";
 const char* WIFI_PASS = "onwifimola"; 
 const char* SERVER_URL = "https://snowboard-api.onrender.com/upload";
 
 // MODIFICACIÓ MÍNIMA: Canviat el pin BOOT (0) pel nou botó de 3 pins al GPIO 14
 const int BOTO_BOOT = 14;       
 const int PIN_LED_ESTAT = 2;  
-bool gravant = false;          
+volatile bool gravant = false; // Afegit 'volatile' perquè es modifica de manera asíncrona des de la interrupció         
 bool isLinked = false;
 int ultimEstatBoto = HIGH;
 unsigned long lastSendMs = 0;
@@ -45,6 +45,19 @@ String pair_code = "";
 // MODIFICACIÓ: Temporitzador ajustat a 5 minuts exactes per renovar el codi de vinculació
 unsigned long lastPairCodeRenewMs = 0; 
 const unsigned long RENEW_PAIR_CODE_INTERVAL = 300000; // 5 minuts en mil·lisegons (5 * 60 * 1000)
+
+// VARIABLES INTERNES PER AL DEBOUNCE ASÍNCRON DE LA INTERRUPCIÓ
+volatile unsigned long ultimTempsInterrupcio = 0;
+
+// FUNCIÓ D'INTERRUPCIÓ (S'executa immediatament per hardware en tocar el botó)
+void IRAM_ATTR manejadorBoto() {
+  unsigned long tempsActual = millis();
+  // Filtre Debounce augmentat a 300ms per garantir estabilitat amb polsadors de 3 pins
+  if (tempsActual - ultimTempsInterrupcio > 300) {
+    gravant = !gravant; // Commuta l'estat (ON/OFF) de manera permanent fins a la següent pulsió
+    ultimTempsInterrupcio = tempsActual;
+  }
+}
 
 void connectaWiFi() {
   if (WiFi.status() == WL_CONNECTED) return;
@@ -86,11 +99,16 @@ void setup() {
   pinMode(BOTO_BOOT, INPUT_PULLUP);
   pinMode(PIN_LED_ESTAT, OUTPUT);
   
+  // CONFIGURACIÓ DE LA INTERRUPCIÓ NATIVA PER AL BOTÓ AL GPIO 14
+  // Canviat a FALLING (flanc de baixada). Només detectarà l'instant en cui el botó és premut cap avall físicament,
+  // ignoring completament el moment en cui l'amolles (evitant que actuï com a pulsador momentani).
+  attachInterrupt(digitalPinToInterrupt(BOTO_BOOT), manejadorBoto, FALLING);
+
   // INICI DEL BUS I2C
   Wire.begin(); 
   Wire.setClock(100000); // Velocitat estable per evitar soroll amb el sensor de temp
   
-  // MODIFICACIÓ: Inicialització i configuració forçada de l'MPU6050 per saltar el bloqueig del clon
+  // MODIFICACIÓ: Inicialització i configuració forçada de l'MPU6050 per saltar el plateau del clon
   Serial.println("-> Inicialitzant el xip MPU6050...");
   mpu.initialize();
   Serial.println("-> Forçant la configuració del sensor clonat...");
@@ -105,9 +123,6 @@ void setup() {
   generaNouPairCode();
   lastPairCodeRenewMs = millis(); // Inicialitzem el comptador del temps
 
-  // MODIFICACIÓ MÍNIMA: Configurem el GPIO_NUM_14 per despertar de l'asno del Light Sleep
-  esp_sleep_enable_ext0_wakeup(GPIO_NUM_14, 1); 
-
   // MODIFICACIÓ: Engeguem la pantalla OLED com a l'origen amb el missatge "hola rider"
   if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { 
     Serial.println(F("Error: No s'ha pogut iniciar l'OLED"));
@@ -119,6 +134,8 @@ void setup() {
     display.print("Welcome\n  rider"); 
     display.display();           // Envia les dades físicament a la pantalla per pintar-les
   }
+  
+  ultimEstatBoto = digitalRead(BOTO_BOOT);
 }
 
 void loop() {
@@ -126,24 +143,24 @@ void loop() {
   while (gpsSerial.available()) { gps.encode(gpsSerial.read()); }
   unsigned long currentMillis = millis();
 
-  // MODIFICACIÓ: Si NO està vinculat, comprovem si han passat 5 minuts per canviar el codi
-  if (!isLinked && (currentMillis - lastPairCodeRenewMs > RENEW_PAIR_CODE_INTERVAL)) {
-    lastPairCodeRenewMs = currentMillis;
-    generaNouPairCode(); // Genera un codi totalment nou de 6 dígits cada 5 minuts
-  }
+  // 2. LECTURA DEL BOTÓ (Eliminada d'aquí per passar a executar-se per Hardware a la funció manejadorBoto d'interrupció nativa)
+  // D'aquesta manera el botó respon l'instant exacte fins i tot si la placa envia per Wi-Fi o processa dades.
 
-  // 2. LECTURA DEL BOTÓ (Adaptada per al canvi de pin i lògica inversa del botó NC)
-  int estatBoto = digitalRead(BOTO_BOOT);
-  if (ultimEstatBoto == LOW && estatBoto == HIGH) {
-    delay(50);
-    if (digitalRead(BOTO_BOOT) == HIGH) gravant = !gravant;
+  // Intenta reconnectar automàticament si s'ha perdut la línia de forma asíncrona
+  if (WiFi.status() != WL_CONNECTED && (currentMillis - lastSendMs > 10000)) {
+    WiFi.begin(WIFI_SSID, WIFI_PASS);
   }
-  ultimEstatBoto = estatBoto;
 
   // 3. ENVIAMENT DE DADES (CADA 5 SEGONS)
   if (currentMillis - lastSendMs > 5000) {
     lastSendMs = currentMillis;
     
+    // MODIFICACIÓ PROTECTORA: El temps del pair_code només es revisa sincronitzat dins dels 5s de l'enviament
+    if (!isLinked && (currentMillis - lastPairCodeRenewMs > RENEW_PAIR_CODE_INTERVAL)) {
+      lastPairCodeRenewMs = currentMillis;
+      generaNouPairCode(); // Genera un codi totalment nou de 6 dígits cada 5 minuts
+    }
+
     float t = bme.readTemperature();
     float h = bme.readHumidity();
     float p = bme.readPressure() / 100.0F;
@@ -175,14 +192,14 @@ void loop() {
       json += "\"gravant\":" + String(gravant ? "true" : "false") + ",";
       json += "\"temp\":" + (isnan(t) ? "null" : String(t, 2)) + ",";
       json += "\"hum\":" + (isnan(h) ? "null" : String(h, 2)) + ",";
-      json += "\"pres\":" + (isnan(p) ? "null" : String(p, 2)) + ",";
-      // MODIFICACIÓ: Afegides les 6 noves variables reals al final del JSON de forma idèntica
-      json += "\"accX\":" + String(accX, 2) + ",";
-      json += "\"accY\":" + String(accY, 2) + ",";
-      json += "\"accZ\":" + String(accZ, 2) + ",";
-      json += "\"gyroX\":" + String(gyroX, 2) + ",";
-      json += "\"gyroY\":" + String(gyroY, 2) + ",";
-      json += "\"gyroZ\":" + String(gyroZ, 2);
+      json += "\"pres\":" + (isnan(p) ? "null" : String(p, 2));
+      // MODIFICACIÓ: S'han comentat les 6 variables perquè el servidor no està preparat, així no el trenquem
+      //json += "\"accX\":" + String(accX, 2) + ",";
+      //json += "\"accY\":" + String(accY, 2) + ",";
+      //json += "\"accZ\":" + String(accZ, 2) + ",";
+      //json += "\"gyroX\":" + String(gyroX, 2) + ",";
+      //json += "\"gyroY\":" + String(gyroY, 2) + ",";
+      //json += "\"gyroZ\":" + String(gyroZ, 2);
       json += "}";
 
       // IMPRIMIR JSON PER PANTALLA (Petició de l'usuari)
@@ -203,34 +220,63 @@ void loop() {
         Serial.print("--- RESP_SERVIDOR: ");
         Serial.println(respostaServidor);
 
-        // CORREGIT: Busquem la paraula linked lliure de cometes i espais per evitar errors de lectura
-        isLinked = (respostaServidor.indexOf("linked") != -1);
+        // CORREGIT: Comprovació explícita per assignar true o false real segons la resposta del servidor
+        if (respostaServidor.indexOf("linked") != -1) {
+          isLinked = true;
+        } else {
+          isLinked = false;
+        }
       } else {
         Serial.printf("Error HTTP de connexio: %d\n", code);
       }
       http.end();
     }
+  }
 
-    // MODIFICACIÓ CLÍTICA: Lògica de pantalles sol·licitada (linked, RECORDING o pendint)
+  // MODIFICACIÓ CRÍTICA: Lògica de pantalles sol·licitada (linked, RECORDING o pendint) extreta fora del delay d'enviament de dades
+  // S'executa asíncronament amb un refresc curt de seguretat (200ms) per evitar parpelleig a l'OLED, responent instantàniament al botó.
+  static unsigned long lastOledRefreshMs = 0;
+  if (millis() - lastOledRefreshMs > 200) {
+    lastOledRefreshMs = millis();
+
     display.clearDisplay();
     display.setTextColor(SSD1306_WHITE);
     
-    if (isLinked) {
-      display.setTextSize(2);
-      display.setCursor(0, 20);
-      
-      // Si està vinculat, mirem si l'usuari ha premut el botó de gravar
-      if (gravant) {
-        display.print("RECORDING"); // Text en anglès quan grava
+    // CORREGIT: Ajustat exactament al disseny sol·licitat tot dins de la zona blava (A partir de Y = 28)
+    if (WiFi.status() != WL_CONNECTED) {
+      // NO Wi-Fi en mida 2
+      display.setTextSize(2);    
+      display.setCursor(15, 28); 
+      display.print("NO-WIFI"); 
+
+      // pending a seques en mida 1 a sota
+      display.setTextSize(1);
+      display.setCursor(43, 50); // Centrat a sota en la línia blava inferior
+      display.print("searching");
+    } 
+    // Si tenim WiFi correctament, passem a avaluar els estats habituals
+    else {
+      if (isLinked) {
+        display.setTextSize(2);
+        display.setCursor(0, 20);
+        
+        // Si està vinculat, mirem si l'usuari ha premut el botó de gravar
+        if (gravant) {
+          display.print("RECORDING"); // Text en anglès quan grava
+        } else {
+          display.print("linked");    // Torna a linked si parem de gravar
+        }
       } else {
-        display.print("linked");    // Torna a linked si parem de gravar
+        display.setTextSize(2);
+        display.setCursor(15, 25); 
+        display.print("pending");
+
+        // Segona línia: El codi separat i ben espaiat més avall (Y = 48)
+        display.setTextSize(2);
+        display.setCursor(15, 48); // Augmentant aquest número (ex: 48, 50...) i baixes el codi al teu gust
+        display.print("Cod:");
+        display.print(pair_code);
       }
-    } else {
-      display.setTextSize(2);
-      display.setCursor(0, 5);
-      display.print("pendint\n");
-      display.print("Cod:");
-      display.print(pair_code);
     }
     display.display(); // Actualitza la pantalla amb els nous canvis reals
   }
