@@ -45,9 +45,17 @@ async def upload(p: dict):
             return {"ok": True, "status": "pending"}
 
         dev = data[0]
-        requests.patch(f"{URL}/rest/v1/dispositius?dispositiu_id=eq.{dis_id}", headers=headers, json={
-            "last_seen_at": now.isoformat(), "is_recording": gravant, "pair_code": pair_code, "pair_expires_at": expires.isoformat()
-        })
+        
+        # CORREGIT ONDEMAND: Protegim el pair_code i el temps d'expiració perquè no es reescriguin a Supabase si el dispositiu ja ha estat acceptat com a linked
+        update_data = {
+            "last_seen_at": now.isoformat(), 
+            "is_recording": gravant
+        }
+        if dev.get("status") != "linked":
+            update_data["pair_code"] = pair_code
+            update_data["pair_expires_at"] = expires.isoformat()
+
+        requests.patch(f"{URL}/rest/v1/dispositius?dispositiu_id=eq.{dis_id}", headers=headers, json=update_data)
 
         if dev.get("status") != "linked" or not dev.get("usuari_id"):
             return {"ok": True, "status": "pending"}
