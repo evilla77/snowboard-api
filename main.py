@@ -80,12 +80,24 @@ async def upload(p: dict):
             else:
                 session_id = active_sessions[0]["id"]
 
-            direccio_text = calcular_direccio(p.get("course", -1))
-            
-            # --- DISPLAY DE TELEMETRIA ---
-            print(f"Guardant punt: {p.get('temp')}°C | {p.get('pres')}hPa | Rumb: {direccio_text}")
+            # 1. Preparem i enviem el resum de salts a la taula 'sessions' (PATCH)
+            session_update = {
+                "jump_count": p.get("jump_count", 0),
+                "straight_airs": p.get("straight_airs", 0),
+                "jumps_180": p.get("jumps_180", 0),
+                "jumps_360": p.get("jumps_360", 0),
+                "jumps_540": p.get("jumps_540", 0),
+                "jumps_720": p.get("jumps_720", 0),
+                "max_airtime": p.get("max_airtime", 0.0),
+                "max_spin": p.get("max_spin", 0.0),
+                "max_landing_g": p.get("max_landing_g", 0.0)
+            }
+            requests.patch(f"{URL}/rest/v1/sessions?id=eq.{session_id}", headers=headers, json=session_update)
 
-            # MODIFICACIÓ MÍNIMA: Afegit 'usuari_id' i mantingut el 'course_text'
+            # 2. Preparem i enviem la posició actual a la taula 'punts_gps' (POST)
+            direccio_text = calcular_direccio(p.get("course", -1))
+            print(f"Actualitzant Sessió {session_id} (Salts: {session_update['jump_count']}) | Nou punt GPS ({p.get('temp')}°C, Rumb: {direccio_text})")
+
             requests.post(f"{URL}/rest/v1/punts_gps", headers=headers, json={
                 "session_id": session_id,
                 "usuari_id": dev.get("usuari_id"),
