@@ -112,11 +112,9 @@ async def upload(p: dict):
             })
         
         else:
-            # 🔵 NOU BLOC STANDBY INDEPENDENT: Si no està gravant, actualitzem la pissarra live_ping
-            print(f"Standby actiu per a {dis_id}: Sobreescribint pissarra ràpida...")
+            # 🔵 BLOC STANDBY OPERATIU: Forcem que PostgREST faci l'UPSERT si no troba la fila primària
+            print(f"Standby actiu per a {dis_id}: Actualitzant la pissarra live_ping...")
             
-            # Perquè Next.js llegeixi bé els camps, el mapa de Python ha de traduir les claus ràpides (lat, lon, spd) 
-            # al format complet que llegeix el teu component visual:
             direccio_text = calcular_direccio(p.get("course", -1))
             payload_standby = {
                 "latitude": p.get("lat"),
@@ -130,13 +128,20 @@ async def upload(p: dict):
                 "timestamp": now.isoformat()
             }
             
-            # Fem un UPSERT mitjançant l'API REST de Supabase a la taula live_ping.
-            # Com que device_id és PRIMARY KEY, reescribirà sempre la mateixa fila sense deixar brossa històrica.
-            requests.post(
+            # 🛠️ CAPÇALERA CORREGIDA: Definim 'action=upsert' per obligar a crear la fila si està buida
+            headers_upsert = {
+                "apikey": KEY,
+                "Authorization": f"Bearer {KEY}",
+                "Content-Type": "application/json",
+                "Prefer": "action=upsert,resolution=merge-duplicates"
+            }
+            
+            r_ping = requests.post(
                 f"{URL}/rest/v1/live_ping", 
-                headers={**headers, "Prefer": "resolution=merge-duplicates"}, 
+                headers=headers_upsert, 
                 json={"device_id": dis_id, "payload": payload_standby, "updated_at": now.isoformat()}
             )
+            print(f"-> Resposta de live_ping a Supabase: Status {r_ping.status_code}")
 
             if active_sessions:
                 print(f"Tancant sessió: {active_sessions[0]['id']}")
