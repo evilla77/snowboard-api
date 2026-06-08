@@ -101,6 +101,7 @@ async def upload(p: dict):
             requests.post(f"{URL}/rest/v1/punts_gps", headers=headers, json={
                 "session_id": session_id,
                 "usuari_id": dev.get("usuari_id"),
+                "timestamp": now.isoformat(),  # ◄── Enregistrem l'hora del punt a la columna corresponent
                 "latitude": p.get("lat"),
                 "longitude": p.get("lon"),
                 "altitude": p.get("alt"),
@@ -112,23 +113,16 @@ async def upload(p: dict):
             })
         
         else:
-            # 🔵 BLOC STANDBY OPERATIU: Forcem que PostgREST faci l'UPSERT si no troba la fila primària
-            print(f"Standby actiu per a {dis_id}: Actualitzant la pissarra live_ping...")
+            # 🔵 BLOC STANDBY ENRIQUIT AUTOMÀTIC (live_ping)
+            print(f"Standby actiu per a {dis_id}: Actualitzant la pissarra live_ping (Format Placa)...")
             
             direccio_text = calcular_direccio(p.get("course", -1))
-            payload_standby = {
-                "latitude": p.get("lat"),
-                "longitude": p.get("lon"),
-                "altitude": p.get("alt"),
-                "speed": p.get("spd"),
-                "temperature": p.get("temp"),
-                "humidity": p.get("hum"),
-                "pressure": p.get("pres"),
-                "course_text": direccio_text,
-                "timestamp": now.isoformat()
-            }
             
-            # 🛠️ CAPÇALERA CORREGIDA: Definim 'action=upsert' per obligar a crear la fila si està buida
+            # Enriquim el mateix diccionari 'p' rebut per no perdre res del que enviï l'ESP32
+            p["course_text"] = direccio_text
+            p["timestamp"] = now.isoformat()
+            
+            # Forcem l'UPSERT a Supabase amb les capçaleres correctes
             headers_upsert = {
                 "apikey": KEY,
                 "Authorization": f"Bearer {KEY}",
@@ -139,7 +133,7 @@ async def upload(p: dict):
             r_ping = requests.post(
                 f"{URL}/rest/v1/live_ping", 
                 headers=headers_upsert, 
-                json={"device_id": dis_id, "payload": payload_standby, "updated_at": now.isoformat()}
+                json={"device_id": dis_id, "payload": p, "updated_at": now.isoformat()}
             )
             print(f"-> Resposta de live_ping a Supabase: Status {r_ping.status_code}")
 
