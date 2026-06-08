@@ -111,9 +111,36 @@ async def upload(p: dict):
                 "course_text": direccio_text
             })
         
-        elif active_sessions:
-            print(f"Tancant sessió: {active_sessions[0]['id']}")
-            requests.patch(f"{URL}/rest/v1/sessions?id=eq.{active_sessions[0]['id']}", headers=headers, json={"ended_at": now.isoformat()})
+        else:
+            # 🔵 NOU BLOC STANDBY INDEPENDENT: Si no està gravant, actualitzem la pissarra live_ping
+            print(f"Standby actiu per a {dis_id}: Sobreescribint pissarra ràpida...")
+            
+            # Perquè Next.js llegeixi bé els camps, el mapa de Python ha de traduir les claus ràpides (lat, lon, spd) 
+            # al format complet que llegeix el teu component visual:
+            direccio_text = calcular_direccio(p.get("course", -1))
+            payload_standby = {
+                "latitude": p.get("lat"),
+                "longitude": p.get("lon"),
+                "altitude": p.get("alt"),
+                "speed": p.get("spd"),
+                "temperature": p.get("temp"),
+                "humidity": p.get("hum"),
+                "pressure": p.get("pres"),
+                "course_text": direccio_text,
+                "timestamp": now.isoformat()
+            }
+            
+            # Fem un UPSERT mitjançant l'API REST de Supabase a la taula live_ping.
+            # Com que device_id és PRIMARY KEY, reescribirà sempre la mateixa fila sense deixar brossa històrica.
+            requests.post(
+                f"{URL}/rest/v1/live_ping", 
+                headers={**headers, "Prefer": "resolution=merge-duplicates"}, 
+                json={"device_id": dis_id, "payload": payload_standby, "updated_at": now.isoformat()}
+            )
+
+            if active_sessions:
+                print(f"Tancant sessió: {active_sessions[0]['id']}")
+                requests.patch(f"{URL}/rest/v1/sessions?id=eq.{active_sessions[0]['id']}", headers=headers, json={"ended_at": now.isoformat()})
 
         return {"ok": True, "status": "linked"}
 
