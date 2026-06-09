@@ -12,7 +12,7 @@ KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
 PAIR_MINUTES = 10
 
 def calcular_direccio(graus):
-    if graus < 0: return "--"
+    if graus is None or graus < 0: return "--"
     dirs = ["N","NE","E","SE","S","SO","O","NO"]
     i = int((graus + 22.5) / 45.0)
     return dirs[i % 8]
@@ -101,7 +101,7 @@ async def upload(p: dict):
             requests.post(f"{URL}/rest/v1/punts_gps", headers=headers, json={
                 "session_id": session_id,
                 "usuari_id": dev.get("usuari_id"),
-                "timestamp": now.isoformat(),  # ◄── Enregistrem l'hora del punt a la columna corresponent
+                "timestamp": now.isoformat(),
                 "latitude": p.get("lat"),
                 "longitude": p.get("lon"),
                 "altitude": p.get("alt"),
@@ -113,16 +113,12 @@ async def upload(p: dict):
             })
         
         else:
-            # 🔵 BLOC STANDBY ENRIQUIT AUTOMÀTIC (live_ping)
-            print(f"Standby actiu per a {dis_id}: Actualitzant la pissarra live_ping (Format Placa)...")
+            # 🔵 BLOC STANDBY ADAPTAT A LES COLUMNES PLANES DE LIVE_PING
+            print(f"Standby actiu per a {dis_id}: Actualitzant columnes planes de live_ping...")
             
             direccio_text = calcular_direccio(p.get("course", -1))
             
-            # Enriquim el mateix diccionari 'p' rebut per no perdre res del que enviï l'ESP32
-            p["course_text"] = direccio_text
-            p["timestamp"] = now.isoformat()
-            
-            # Forcem l'UPSERT a Supabase amb les capçaleres correctes
+            # Forcem l'UPSERT amb capçaleres de fusió per clau primària (device_id)
             headers_upsert = {
                 "apikey": KEY,
                 "Authorization": f"Bearer {KEY}",
@@ -130,21 +126,35 @@ async def upload(p: dict):
                 "Prefer": "action=upsert,resolution=merge-duplicates"
             }
             
+            # Creem el diccionari directament mapejat amb els noms reals de les columnes
+            dades_ping = {
+                "device_id": dis_id,
+                "updated_at": now.isoformat(),
+                "lat": p.get("lat"),
+                "lon": p.get("lon"),
+                "alt": p.get("alt"),
+                "spd": p.get("spd"),
+                "temp": p.get("temp"),
+                "hum": p.get("hum"),
+                "pres": p.get("pres"),
+                "course_text": direccio_text
+            }
+            
             r_ping = requests.post(
                 f"{URL}/rest/v1/live_ping", 
                 headers=headers_upsert, 
-                json={"device_id": dis_id, "payload": p, "updated_at": now.isoformat()}
+                json=dades_ping
             )
             print(f"-> Resposta de live_ping a Supabase: Status {r_ping.status_code}")
 
             if active_sessions:
-                print(f"Tancant sessió: {active_sessions[0]['id']}")
+                print(f"Tancant sessió activa per entrada en standby: {active_sessions[0]['id']}")
                 requests.patch(f"{URL}/rest/v1/sessions?id=eq.{active_sessions[0]['id']}", headers=headers, json={"ended_at": now.isoformat()})
 
         return {"ok": True, "status": "linked"}
 
     except Exception as e:
-        print(f"ERROR: {e}")
+        print(f"ERROR AL MAIN: {e}")
         return {"ok": False, "error": str(e)}
 
 @app.get("/")
