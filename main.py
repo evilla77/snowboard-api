@@ -17,6 +17,18 @@ def calcular_direccio(graus):
     i = int((graus + 22.5) / 45.0)
     return dirs[i % 8]
 
+def calcular_altitud_barometrica(pressio_hpa):
+    """
+    Calcula l'altitud en metres a partir de la pressió en hPa
+    fent servir la fórmula baromètrica internacional estàndard.
+    """
+    if pressio_hpa is None or pressio_hpa <= 0:
+        return None
+    
+    # 1013.25 hPa és la pressió estàndard a nivell del mar
+    altitud = 44330.0 * (1.0 - (pressio_hpa / 1013.25) ** 0.190295)
+    return round(altitud, 2)
+
 @app.post("/upload")
 async def upload(p: dict):
     # --- DISPLAY DE DADES REBUDES ---
@@ -29,6 +41,12 @@ async def upload(p: dict):
     pair_code = p.get("pair_code")
     headers = {"apikey": KEY, "Authorization": f"Bearer {KEY}", "Content-Type": "application/json", "Prefer": "return=representation"}
     
+    # Calculem l'alçada baromètrica en una variable independent
+    pressio = p.get("pres")
+    alt_bar = calcular_altitud_barometrica(pressio) if pressio else None
+    if alt_bar:
+        print(f"📊 Telemetria: GPS={p.get('alt')}m | BAROMÈTRICA={alt_bar}m")
+
     now = datetime.now(timezone.utc)
     expires = now + timedelta(minutes=PAIR_MINUTES)
 
@@ -62,7 +80,7 @@ async def upload(p: dict):
 
         requests.patch(f"{URL}/rest/v1/dispositius?dispositiu_id=eq.{dis_id}", headers=headers, json=update_data)
 
-        # 🚨 CONTROL DE SEGURETAT: Si no està vinculat o falta l'usuari_id, no enviem res a live_ping
+        # CONTROL DE SEGURETAT: Si no està vinculat o falta l'usuari_id, no enviem res a live_ping
         if dev.get("status") != "linked" or not dev.get("usuari_id"):
             print(f"El dispositiu {dis_id} està 'pending' o no té usuari assignat. Es cancel·la el flux live.")
             return {"ok": True, "status": "pending"}
@@ -105,7 +123,7 @@ async def upload(p: dict):
             }
             requests.patch(f"{URL}/rest/v1/sessions?id=eq.{session_id}", headers=headers, json=session_update)
 
-            # 2. Guardar punt històric a punts_gps
+            # 2. Guardar punt històric a punts_gps (incloent altitud_bar)
             direccio_text = calcular_direccio(p.get("course", -1))
             requests.post(f"{URL}/rest/v1/punts_gps", headers=headers, json={
                 "session_id": session_id,
@@ -114,6 +132,7 @@ async def upload(p: dict):
                 "latitude": p.get("lat"),
                 "longitude": p.get("lon"),
                 "altitude": p.get("alt"),
+                "altitud_bar": alt_bar,
                 "speed": p.get("spd"),
                 "temperature": p.get("temp"),
                 "humidity": p.get("hum"),
@@ -129,7 +148,6 @@ async def upload(p: dict):
             
             direccio_text = calcular_direccio(p.get("course", -1))
             
-            # Cambiem Prefer a 'resolution=merge-duplicates' per utilitzar la teva clau primària correctament
             headers_upsert = {
                 "apikey": KEY,
                 "Authorization": f"Bearer {KEY}",
@@ -137,14 +155,15 @@ async def upload(p: dict):
                 "Prefer": "action=upsert,resolution=merge-duplicates"
             }
             
-            # Sincronitzat al 100% amb el canvi a 'dispositiu_id' de Supabase
+            # Sincronitzat amb la taula live_ping (incloent altitud_bar)
             dades_ping = {
-                "dispositiu_id": dis_id,            # ◄── Sincronitzat amb la teva columna de clau primària
-                "usuari_id": dev.get("usuari_id"),  # ◄── S'envia la ID de l'usuari propietari (Adéu al NULL!)
+                "dispositiu_id": dis_id,
+                "usuari_id": dev.get("usuari_id"),
                 "updated_at": now.isoformat(),
                 "lat": p.get("lat"),
                 "lon": p.get("lon"),
                 "alt": p.get("alt"),
+                "altitud_bar": alt_bar,
                 "spd": p.get("spd"),
                 "temp": p.get("temp"),
                 "hum": p.get("hum"),
