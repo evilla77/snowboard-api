@@ -56,7 +56,29 @@ unsigned long tempsIniciPortal = 0;
 const unsigned long TEMPS_MAX_PORTAL = 240000; // 4 minuts en mil·lisegons
 
 // =======================================================================
-// INTERRUPCIÓ CORREGIDA: SENSE TEMPORITZADORS DE CONTROL
+// VARIABLES DE TELEMETRIA DE SALTS I TRUCS
+// =======================================================================
+int jumpCount = 0;
+unsigned long tempsIniciVol = 0;
+bool volant = false;
+float maxAirtimeSessio = 0.0;
+float maxSpinSessio = 0.0;
+float maxLandingG = 0.0;
+
+// Comptadors de trucs segons la rotació realitzada
+int count180 = 0;
+int count360 = 0;
+int count540 = 0;
+int count720 = 0;
+int countAeriNet = 0; // Salts rectes (Straight Airs)
+
+// Variables per a l'acumulador del giroscopi
+float grausGiratsActuals = 0.0;
+unsigned long ultimTempsCalculMpu = 0;
+
+
+// =======================================================================
+// INTERRUPCIÓ OPTIMITZADA EN ENERGIA I SEGREURETAT DE TEMPS
 // =======================================================================
 void IRAM_ATTR manejadorBoto() {
   unsigned long tempsActual = millis();
@@ -64,9 +86,32 @@ void IRAM_ATTR manejadorBoto() {
   // Filtre físic anti-rebots bàsic de 300ms
   if (tempsActual - ultimTempsInterrupcio > 300) {
     
-    // CAS A: Si està connectat, un clic canvia el mode de gravació (la teva lògica)
+    // CAS A: Si està connectat, un clic canvia el mode de gravació
     if (!portalActiu && WiFi.status() == WL_CONNECTED && isLinked) {
       gravant = !gravant; 
+      
+      lastSendMs = 0; // MODIFICACIÓ MÍNIMA: Força l'enviament immediat al canviar d'estat
+      
+      // OPTIMITZACIÓ: Si acabem d'activar la gravació, sincronitzem el rellotge de l'MPU
+      if (gravant) {
+        ultimTempsCalculMpu = tempsActual; 
+      }
+      else {
+        // =======================================================================
+        // AFEGIT: RESETEIG DE CONTADORS AL PASSAR A 'GRAVANT = FALSE' (TANCAR SESSIÓ)
+        // =======================================================================
+        jumpCount = 0;
+        countAeriNet = 0;
+        count180 = 0;
+        count360 = 0;
+        count540 = 0;
+        count720 = 0;
+        maxAirtimeSessio = 0.0;
+        maxSpinSessio = 0.0;
+        maxLandingG = 0.0;
+        volant = false;
+        grausGiratsActuals = 0.0;
+      }
     }
     // CAS B: Si està offline, un clic normal demana obrir el portal
     else if (!portalActiu && WiFi.status() != WL_CONNECTED) {
@@ -84,7 +129,7 @@ void handleRoot() {
   html += "input[type=text], input[type=password]{width:80%; padding:12px; margin:10px 0; border:none; border-radius:4px;}";
   html += "input[type=submit]{background:#00adb5; color:white; padding:14px 20px; border:none; border-radius:4px; cursor:pointer; width:84%; font-size:16px;}";
   html += "</style></head><body>";
-  html += "<h2>Rider Tracker Config</h2>";
+  html += "<h2>WhiteBoX Config</h2>";
   html += "<form action='/save' method='POST'>";
   html += "<input type='text' name='ssid' placeholder='Nom del Wi-Fi (SSID)' required><br>";
   html += "<input type='password' name='pass' placeholder='Contrasenya Wi-Fi'><br><br>";
@@ -114,10 +159,15 @@ void handleSave() {
   }
 }
 
-void printDebugLocal(float t, float h, float p) {
+// Mantenim el printDebugLocal intacte acceptant valors de l'MPU (en mode espera passarem 0s)
+void printDebugLocal(float t, float h, float p, float ax, float ay, float az, float gx, float gy, float gz) {
   Serial.println("\n--- DADES ACTUALS ---");
   Serial.printf("TEMP: %.2f C | HUM: %.2f %% | PRES: %.2f hPa\n", t, h, p);
   Serial.printf("GPS: Lat %.6f, Lon %.6f | Sats: %d\n", gps.location.lat(), gps.location.lng(), gps.satellites.value());
+  Serial.printf("ACCEL (G): X: %.2f | Y: %.2f | Z: %.2f\n", ax, ay, az);
+  Serial.printf("GYRO (°/s): X: %.2f | Y: %.2f | Z: %.2f\n", gx, gy, gz);
+  Serial.printf("TRUCS: Total: %d | 180s: %d | 360s: %d | 540s: %d | Rectes: %d\n", jumpCount, count180, count360, count540, countAeriNet);
+  Serial.printf("RÈCORDS: Max Airtime: %.2fs | Max Spin: %.0f deg | Max Landing: %.2fG\n", maxAirtimeSessio, maxSpinSessio, maxLandingG);
   Serial.printf("ESTAT: %s\n", gravant ? "GRAVANT" : "ESPERANT");
   Serial.println("---------------------\n");
 }
@@ -155,12 +205,10 @@ void setup() {
     display.clearDisplay();
     display.setTextColor(SSD1306_WHITE);
     
-    // Nom del dispositiu ben gran
     display.setTextSize(2);
     display.setCursor(15, 20);
     display.print("WhiteBoX"); 
     
-    // Subtítol de sistema en petit
     display.setTextSize(1);
     display.setCursor(9, 45);
     display.print("SNOWBOARD TELEMETRY"); 
@@ -171,7 +219,6 @@ void setup() {
   generaNouPairCode();
   lastPairCodeRenewMs = millis(); 
 
-  // Llegir de la memòria
   preferences.begin("wifi-config", true);
   wifi_ssid = preferences.getString("ssid", ""); 
   wifi_pass = preferences.getString("pass", "");
@@ -201,22 +248,70 @@ void setup() {
   display.display();
   ultimEstatBoto = digitalRead(BOTO_BOOT);
   
-  // Ignorem qualsevol micro-caiguda de tensió de l'arrencada posant a fals la petició
   demanaPortalAP = false; 
+  ultimTempsCalculMpu = millis();
 }
 
 void loop() {
   unsigned long currentMillis = millis();
 
   // =======================================================================
-  // ACCIÓ DEL BOTÓ RECIBIDA PER INTERRUPCIÓ (CLIC SIMPLE SENSE COMPLICACIONS)
+  // ENERGIA CLAU: L'MPU NOMÉS S'ESCOLTA I INTERPRETA SI S'ESTÀ GRAVANT
+  // =======================================================================
+  if (gravant && (currentMillis - ultimTempsCalculMpu >= 20)) {
+    float dt = (currentMillis - ultimTempsCalculMpu) / 1000.0; 
+    ultimTempsCalculMpu = currentMillis;
+
+    int16_t rawAX, rawAY, rawAZ;
+    int16_t rawGX, rawGY, rawGZ;
+    mpu.getMotion6(&rawAX, &rawAY, &rawAZ, &rawGX, &rawGY, &rawGZ);
+
+    float ax = (float)rawAX / 2048.0;
+    float ay = (float)rawAY / 2048.0;
+    float az = (float)rawAZ / 2048.0;
+    float gz = (float)rawGZ / 16.4;
+
+    float gTotal = sqrt(ax*ax + ay*ay + az*az);
+
+    if (!volant && gTotal < 0.4) {
+      volant = true;
+      tempsIniciVol = currentMillis;
+      grausGiratsActuals = 0.0; 
+    }
+
+    if (volant) {
+      grausGiratsActuals += abs(gz) * dt; 
+    }
+
+    if (volant && gTotal > 1.4) {
+      volant = false;
+      unsigned long duradaVolMs = currentMillis - tempsIniciVol;
+
+      if (duradaVolMs > 150) {
+        jumpCount++; 
+        float tempsVolSegons = duradaVolMs / 1000.0;
+
+        if (tempsVolSegons > maxAirtimeSessio) maxAirtimeSessio = tempsVolSegons;
+        if (grausGiratsActuals > maxSpinSessio) maxSpinSessio = grausGiratsActuals;
+        if (gTotal > maxLandingG) maxLandingG = gTotal;
+
+        if (grausGiratsActuals >= 90 && grausGiratsActuals < 270) { count180++; } 
+        else if (grausGiratsActuals >= 270 && grausGiratsActuals < 450) { count360++; } 
+        else if (grausGiratsActuals >= 450 && grausGiratsActuals < 630) { count540++; } 
+        else if (grausGiratsActuals >= 630) { count720++; }
+        else if (grausGiratsActuals < 90) { countAeriNet++; }
+      }
+    }
+  }
+
+  // =======================================================================
+  // PORTAL DE CONFIGURACIÓ ACUAT ACTIU SI S'HA DEMANAT
   // =======================================================================
   if (demanaPortalAP && !portalActiu) {
-    demanaPortalAP = false; // Resetejem l'ordre
-    
+    demanaPortalAP = false; 
     Serial.println("-> Clic detectat correctament. Obrint Portal per 4 minuts...");
     portalActiu = true;
-    tempsIniciPortal = currentMillis; // Guardem l'hora d'obertura pel timeout
+    tempsIniciPortal = currentMillis; 
     
     WiFi.mode(WIFI_AP);
     WiFi.softAP(AP_SSID); 
@@ -227,28 +322,19 @@ void loop() {
     server.begin();
   }
 
-  // =======================================================================
-  // TIMEOUT DE TANCAMENT: 4 MINUTS D'AUTO-APAGAT
-  // =======================================================================
   if (portalActiu) {
     if (currentMillis - tempsIniciPortal >= TEMPS_MAX_PORTAL) {
-      Serial.println("-> Han passat 4 minuts. Tancant portal per seguretat/energia...");
-      dnsServer.stop();
-      server.stop();
-      WiFi.mode(WIFI_OFF); 
-      portalActiu = false;
+      Serial.println("-> Han passat 4 minuts. Tancant portal...");
+      dnsServer.stop(); server.stop(); WiFi.mode(WIFI_OFF); portalActiu = false;
       return;
     }
-
     dnsServer.processNextRequest();
     server.handleClient(); 
     
     static unsigned long lastOledPortalMs = 0;
     if (currentMillis - lastOledPortalMs > 200) {
       lastOledPortalMs = currentMillis;
-      
       unsigned long segonsRestants = (TEMPS_MAX_PORTAL - (currentMillis - tempsIniciPortal)) / 1000;
-
       display.clearDisplay();
       display.setTextColor(SSD1306_WHITE);
       display.setTextSize(1); display.setCursor(5, 5); display.print("WhiteBoX CONFIG");
@@ -261,49 +347,67 @@ void loop() {
   }
 
   // =======================================================================
-  // LA TEVA LÒGICA ORIGINAL DE LECTURA I ENVIAMENT MODIFICADA
+  // EL GPS I BME280 NOMÉS S'ESCOLTEN SI EL DISPOSITIU ESTÀ VINCULAT (isLinked)
   // =======================================================================
-  while (gpsSerial.available()) { gps.encode(gpsSerial.read()); }
-
-  if (wifi_ssid != "" && WiFi.status() != WL_CONNECTED && (currentMillis - lastSendMs > 15000)) {
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(wifi_ssid.c_str(), wifi_pass.c_str());
+  if (isLinked) {
+    while (gpsSerial.available()) { gps.encode(gpsSerial.read()); }
   }
 
-  // MODIFICACIÓ: Definim l'interval segons si està gravant o no
-unsigned long intervalEnviament = (gravant || !isLinked) ? 5000 : 60000;// 5s si grava o pending, 1 minut (60000ms) si està en espera
+  if (wifi_ssid != "" && WiFi.status() != WL_CONNECTED && (currentMillis - lastSendMs > 15000)) {
+    WiFi.mode(WIFI_STA); WiFi.begin(wifi_ssid.c_str(), wifi_pass.c_str());
+  }
+
+  unsigned long intervalEnviament = (gravant || !isLinked) ? 5000 : 60000;
 
   if (currentMillis - lastSendMs > intervalEnviament) {
     lastSendMs = currentMillis;
     
     if (!isLinked && (currentMillis - lastPairCodeRenewMs > RENEW_PAIR_CODE_INTERVAL)) {
-      lastPairCodeRenewMs = currentMillis;
-      generaNouPairCode(); 
+      lastPairCodeRenewMs = currentMillis; generaNouPairCode(); 
     }
 
-    float t = bme.readTemperature();
-    float h = bme.readHumidity();
-    float p = bme.readPressure() / 100.0F;
+    // El BME280 només es llegeix si està vinculat, si no enviem zeros
+    float t = 0.0, h = 0.0, p = 0.0;
+    if (isLinked) {
+      t = bme.readTemperature();
+      h = bme.readHumidity();
+      p = bme.readPressure() / 100.0F;
+    }
 
-    int16_t rawAX, rawAY, rawAZ;
-    int16_t rawGX, rawGY, rawGZ;
-    mpu.getMotion6(&rawAX, &rawAY, &rawAZ, &rawGX, &rawGY, &rawGZ);
+    // Si està gravant agafem telemetria real de l'MPU per imprimir en local, si no passem zeros
+    float ax_inst = 0, ay_inst = 0, az_inst = 0, gx_inst = 0, gy_inst = 0, gz_inst = 0;
+    if (gravant) {
+      int16_t rAX, rAY, rAZ, rGX, rGY, rGZ;
+      mpu.getMotion6(&rAX, &rAY, &rAZ, &rGX, &rGY, &rGZ);
+      ax_inst = (float)rAX / 2048.0; ay_inst = (float)rAY / 2048.0; az_inst = (float)rAZ / 2048.0;
+      gx_inst = (float)rGX / 16.4;  gy_inst = (float)rGY / 16.4;  gz_inst = (float)rGZ / 16.4;
+    }
 
-    printDebugLocal(t, h, p); 
+    printDebugLocal(t, h, p, ax_inst, ay_inst, az_inst, gx_inst, gy_inst, gz_inst); 
 
     if (WiFi.status() == WL_CONNECTED) {
       String json = "{";
       json += "\"device_id\":\"" + WiFi.macAddress() + "\",";
       json += "\"pair_code\":\"" + pair_code + "\",";
-      json += "\"lat\":" + String(gps.location.lat(), 6) + ",";
-      json += "\"lon\":" + String(gps.location.lng(), 6) + ",";
-      json += "\"alt\":" + String(gps.altitude.meters(), 2) + ",";
-      json += "\"spd\":" + String(gps.speed.kmph(), 2) + ",";
-      json += "\"course\":" + String(gps.course.deg(), 2) + ",";
+      json += "\"lat\":" + String(isLinked ? gps.location.lat() : 0.0, 6) + ",";
+      json += "\"lon\":" + String(isLinked ? gps.location.lng() : 0.0, 6) + ",";
+      json += "\"alt\":" + String(isLinked ? gps.altitude.meters() : 0.0, 2) + ",";
+      json += "\"spd\":" + String(isLinked ? gps.speed.kmph() : 0.0, 2) + ",";
+      json += "\"course\":" + String(isLinked ? gps.course.deg() : 0.0, 2) + ",";
       json += "\"gravant\":" + String(gravant ? "true" : "false") + ",";
-      json += "\"temp\":" + (isnan(t) ? "null" : String(t, 2)) + ",";
-      json += "\"hum\":" + (isnan(h) ? "null" : String(h, 2)) + ",";
-      json += "\"pres\":" + (isnan(p) ? "null" : String(p, 2));
+      json += "\"temp\":" + (isLinked && !isnan(t) ? String(t, 2) : "0.00") + ",";
+      json += "\"hum\":" + (isLinked && !isnan(h) ? String(h, 2) : "0.00") + ",";
+      json += "\"pres\":" + (isLinked && !isnan(p) ? String(p, 2) : "0.00") + ","; 
+      
+      json += "\"jump_count\":" + String(jumpCount) + ",";
+      json += "\"straight_airs\":" + String(countAeriNet) + ",";
+      json += "\"jumps_180\":" + String(count180) + ",";
+      json += "\"jumps_360\":" + String(count360) + ",";
+      json += "\"jumps_540\":" + String(count540) + ",";
+      json += "\"jumps_720\":" + String(count720) + ",";
+      json += "\"max_airtime\":" + String(maxAirtimeSessio, 2) + ",";
+      json += "\"max_spin\":" + String(maxSpinSessio, 0) + ",";
+      json += "\"max_landing_g\":" + String(maxLandingG, 2);
       json += "}";
 
       Serial.println("--- JSON ENVIAT ---");
@@ -314,17 +418,10 @@ unsigned long intervalEnviament = (gravant || !isLinked) ? 5000 : 60000;// 5s si
       http.begin(client, SERVER_URL); http.addHeader("Content-Type", "application/json");
       
       int code = http.POST(json);
-      
       if (code > 0) {
         String respostaServidor = http.getString();
-        Serial.print("--- RESP_SERVIDOR: ");
-        Serial.println(respostaServidor);
-
-        if (respostaServidor.indexOf("linked") != -1) {
-          isLinked = true;
-        } else {
-          isLinked = false;
-        }
+        Serial.print("--- RESP_SERVIDOR: "); Serial.println(respostaServidor);
+        isLinked = (respostaServidor.indexOf("linked") != -1);
       } else {
         Serial.printf("Error HTTP de connexio: %d\n", code);
       }
@@ -332,11 +429,10 @@ unsigned long intervalEnviament = (gravant || !isLinked) ? 5000 : 60000;// 5s si
     }
   }
 
-  // REFRESC ASÍNCRON DE LES TEVES PANTALLES ORDINÀRIES (Cada 200ms)
+  // REFRESC DE LA PANTALLA OLED (Cada 200ms)
   static unsigned long lastOledRefreshMs = 0;
   if (millis() - lastOledRefreshMs > 200) {
     lastOledRefreshMs = millis();
-
     display.clearDisplay();
     display.setTextColor(SSD1306_WHITE);
     
@@ -349,8 +445,7 @@ unsigned long intervalEnviament = (gravant || !isLinked) ? 5000 : 60000;// 5s si
         if (gravant) display.print("RECORDING"); else display.print("linked");    
       } else {
         display.setTextSize(2); display.setCursor(15, 20); display.print("pending");
-        display.setTextSize(2); display.setCursor(5, 45); 
-        display.print("PC:"); display.print(pair_code);
+        display.setTextSize(2); display.setCursor(5, 45); display.print("PC:"); display.print(pair_code);
       }
     }
     display.display(); 
