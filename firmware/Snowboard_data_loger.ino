@@ -82,11 +82,11 @@ portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
 TaskHandle_t TaskIMUHandle;
 
 // =======================================================================
-// TASCA DEDICADA PER A LA IMU A 200 Hz (CORE 0)
+// TASCA DEDICADA PER A LA IMU A 100 Hz (CORE 0)
 // =======================================================================
 void TaskIMU(void * pvParameters) {
   TickType_t xLastWakeTime = xTaskGetTickCount();
-  const TickType_t xFrequency = pdMS_TO_TICKS(5); // 200 Hz
+  const TickType_t xFrequency = pdMS_TO_TICKS(10); // 100 Hz
 
   bool volant = false;
   unsigned long tempsIniciVol = 0;
@@ -116,7 +116,7 @@ void TaskIMU(void * pvParameters) {
       portEXIT_CRITICAL(&timerMux);
 
       float gTotal = sqrt(ax*ax + ay*ay + az*az);
-      float dt = 0.005; // 5 ms
+      float dt = 0.010; // 10 ms
       unsigned long ara = millis();
 
       // 1. DETECCIÓ D'ENLAIRAMENT (< 0.40G)
@@ -141,16 +141,16 @@ void TaskIMU(void * pvParameters) {
         grausGiratsActuals += omegaTotal * dt; 
       }
 
-      // 3. DETECCIÓ D'ATERRATGE (> 1.25G)
-      if (volant && gTotal > 1.25) {
+      // 3. DETECCIÓ D'ATERRATGE (> 1.40G)
+      if (volant && gTotal > 1.40) {
         volant = false;
         ultimAterratgeMs = ara; // Inicia el temps de refredament
         comptadorMostresEnAire = 0;
 
         unsigned long duradaVolMs = ara - tempsIniciVol;
 
-        // Filtre de durada: El salt ha de durar almenys 200 ms per ser considerat vàlid
-        if (duradaVolMs >= 200) { 
+        // Filtre de durada: El salt ha de durar almenys 150 ms per ser considerat vàlid
+        if (duradaVolMs >= 150) { 
           float tempsVolSegons = duradaVolMs / 1000.0;
 
           portENTER_CRITICAL(&timerMux);
@@ -370,7 +370,7 @@ void loop() {
       unsigned long segonsRestants = (TEMPS_MAX_PORTAL - (currentMillis - tempsIniciPortal)) / 1000;
       display.clearDisplay(); display.setTextColor(SSD1306_WHITE);
       display.setTextSize(1); display.setCursor(5, 5); display.print("WhiteBoX CONFIG");
-      display.setCursor(5, 22); display.print("SSID: WhiteBoX");
+      display.setCursor(5, 22); display.print("SSID:" + String(AP_SSID));
       display.setCursor(5, 54); display.print(String(segonsRestants) + "s left");
       display.display();
     }
