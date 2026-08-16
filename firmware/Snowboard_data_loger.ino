@@ -137,8 +137,7 @@ void TaskIMU(void * pvParameters) {
 
       // 2. INTEGRACIÓ DE GIR MENTRE VOLA
       if (volant) {
-        float omegaTotal = sqrt(gx*gx + gy*gy + gz*gz);
-        grausGiratsActuals += omegaTotal * dt; 
+        grausGiratsActuals += fabs(gy) * dt;
       }
 
       // 3. DETECCIÓ D'ATERRATGE (> 1.40G)
